@@ -4,7 +4,8 @@ import os
 import math
 import logging
 import traceback
-from PIL import Image, ImageChops, UnidentifiedImageError, ImageFile
+from typing import Optional, Tuple, List
+from PIL import Image, ImageChops, UnidentifiedImageError, ImageFile, ImageEnhance
 
 # --- Настройка Логгера ---
 # Используем стандартный модуль logging
@@ -441,62 +442,50 @@ def crop_image(img, symmetric_axes=False, symmetric_absolute=False):
     return final_image
 
 
-def add_padding(img, padding_percent, bg_color=(0, 0, 0, 0)):
-    """
-    Добавляет отступы к изображению в процентах (%) от большей стороны.
-    Args:
-        img: PIL Image
-        padding_percent: Процент отступа от большей стороны.
-        bg_color: Цвет фона
-    
-    Returns:
-        Изображение с отступами, или None.
-    """
-    if not img: return None
-    try:
-        # Определяем логгер
-        import logging
-        log = logging.getLogger("PhotoProcessor")
-        
-        log.info(f"Adding padding {padding_percent}% to image {img.size}")
-        print(f"--- PRINT: Adding padding {padding_percent}% to image {img.size} ---")
-        
-        w, h = img.size
-        max_dim = max(w, h)
-        pad_px = int(round(max_dim * (padding_percent / 100.0)))
-        
-        if pad_px <= 0: 
-            log.info("Skipping padding (zero pixels)")
-            return img
-        
-        new_w, new_h = w + 2 * pad_px, h + 2 * pad_px
-        img_mode = img.mode
-        log.info(f"Padding: {w}x{h} -> {new_w}x{new_h}, Mode: {img_mode}")
-        print(f"--- PRINT: Padding: {w}x{h} -> {new_w}x{new_h}, Mode: {img_mode} ---")
-        
-        # Создаем новый холст (в том же режиме, что и исходное изображение)
-        # Проверяем, нужно ли конвертировать в RGBA сначала
-        need_rgba = False
-        if img_mode not in ('RGBA', 'RGBa') and len(bg_color) == 4 and bg_color[3] < 255:
-            need_rgba = True
-            log.info("Converting to RGBA for transparent padding")
-        
-        if need_rgba and img_mode != 'RGBA':
-            img = img.convert('RGBA')
-            log.info(f"Converted from {img_mode} to RGBA for padding")
-            print(f"--- PRINT: Converted from {img_mode} to RGBA for padding ---")
-            img_mode = 'RGBA'
-            
-        # Создаем новый холст
-        result = Image.new(img_mode, (new_w, new_h), color=bg_color[:len(img_mode) if img_mode != 'P' else 1])
-        result.paste(img, (pad_px, pad_px))
-        log.info(f"Padding complete. Final size: {result.size}, Mode: {result.mode}")
-        print(f"--- PRINT: Padding complete. Final size: {result.size}, Mode: {result.mode} ---")
-        return result
-    except Exception as e:
-        if log: log.error(f"Error adding padding: {e}")
-        print(f"--- PRINT ERROR: Adding padding failed: {e} ---")
+def add_padding(img, percent):
+    """Adds transparent padding around the image (expects RGBA)."""
+    if img is None or percent <= 0:
+        if percent <= 0: log.debug("Padding skipped (percent is zero or negative).")
         return img
+
+    if img.mode != 'RGBA':
+        log.warning("Input image for add_padding is not RGBA. Converting.")
+        try:
+             img = img.convert("RGBA")
+        except Exception as e:
+            log.error(f"Failed to convert to RGBA for padding: {e}. Padding cancelled.", exc_info=True)
+            return img # Return original on conversion error
+
+    w, h = img.size
+    if w == 0 or h == 0:
+        log.warning("add_padding warning: Input image has zero size.")
+        return img
+
+    # Calculate padding pixels based on the larger dimension
+    padding_pixels = int(round(max(w, h) * (percent / 100.0)))
+    if padding_pixels <= 0:
+        log.debug("Padding skipped (calculated padding is zero).")
+        return img
+
+    new_width = w + 2 * padding_pixels
+    new_height = h + 2 * padding_pixels
+    log.info(f"Adding padding: {percent}% ({padding_pixels}px). New size: {new_width}x{new_height}")
+
+    padded_img = None
+    try:
+        # Create a new transparent canvas
+        padded_img = Image.new('RGBA', (new_width, new_height), (0, 0, 0, 0))
+        # Paste the original image onto the canvas, centered
+        paste_pos = (padding_pixels, padding_pixels)
+        padded_img.paste(img, paste_pos, mask=img) # Use img as mask since it's RGBA
+        log.debug("Pasted image onto new padded canvas.")
+        # Close the original image passed to the function
+        safe_close(img)
+        return padded_img # Return the new padded image
+    except Exception as e:
+        log.error(f"Error during paste or other operation in add_padding: {e}", exc_info=True)
+        safe_close(padded_img) # Close the canvas if created but failed
+        return img # Return the original image on error
 
 def check_perimeter_is_white(img, tolerance, margin):
     """
@@ -636,5 +625,99 @@ def check_perimeter_is_white(img, tolerance, margin):
              safe_close(img_to_check)
 
     return is_white
+
+# === НОВАЯ ФУНКЦИЯ (ИСПРАВЛЕННАЯ + ДОП. ЛОГИ) ===
+def apply_brightness_contrast(img: Optional[Image.Image], brightness_factor: float = 1.0, contrast_factor: float = 1.0) -> Optional[Image.Image]:
+    """Применяет яркость и контраст к изображению, сохраняя альфа-канал."""
+    # Убираем проверку на маленькую разницу для отладки
+    # if not img or (abs(brightness_factor - 1.0) < 0.01 and abs(contrast_factor - 1.0) < 0.01):
+    if not img or (brightness_factor == 1.0 and contrast_factor == 1.0):
+        log.debug("  Brightness/Contrast adjustment skipped (factors are 1.0 or no image).")
+        return img
+
+    img_copy = None; img_rgb = None; alpha_channel = None; adjusted_rgb = None; final_image = img
+    try:
+        log.info(f"--> Applying Brightness/Contrast (B:{brightness_factor:.2f}, C:{contrast_factor:.2f}) to mode {img.mode}") # Используем INFO для заметности
+        img_copy = img.copy()
+        original_mode = img_copy.mode
+        has_alpha = 'A' in img_copy.getbands()
+
+        # Извлекаем RGB и Alpha
+        if has_alpha:
+            split_bands = img_copy.split()
+            if len(split_bands) == 4:
+                img_rgb = Image.merge('RGB', split_bands[:3])
+                alpha_channel = split_bands[3]
+                for band in split_bands[:3]: safe_close(band)
+                log.debug("    Separated RGB and Alpha channels.")
+            else: 
+                log.warning(f"    Unexpected bands ({len(split_bands)}) with Alpha. Converting base to RGB.")
+                img_rgb = img_copy.convert('RGB')
+                has_alpha = False 
+        elif original_mode != 'RGB':
+            img_rgb = img_copy.convert('RGB')
+            log.debug(f"    Converted {original_mode} to RGB for adjustments.")
+        else:
+            img_rgb = img_copy # Уже RGB, используем копию
+            log.debug("    Using original RGB image for adjustments.")
+        
+        adjusted_rgb = img_rgb # Начинаем с RGB
+        img_rgb = None 
+
+        # Применяем ЯРКОСТЬ
+        if brightness_factor != 1.0:
+            log.info(f"    Adjusting brightness: factor={brightness_factor:.2f}")
+            log.debug(f"      Before Brightness: {repr(adjusted_rgb)}")
+            enhancer_b = ImageEnhance.Brightness(adjusted_rgb)
+            temp_img_b = enhancer_b.enhance(brightness_factor)
+            log.debug(f"      After Brightness Enhance: {repr(temp_img_b)}")
+            if temp_img_b is not adjusted_rgb: safe_close(adjusted_rgb)
+            adjusted_rgb = temp_img_b
+        else:
+            log.debug("    Brightness factor is 1.0, skipping adjustment.")
+
+        # Применяем КОНТРАСТ
+        if contrast_factor != 1.0:
+            log.info(f"    Adjusting contrast: factor={contrast_factor:.2f}")
+            log.debug(f"      Before Contrast: {repr(adjusted_rgb)}")
+            enhancer_c = ImageEnhance.Contrast(adjusted_rgb)
+            temp_img_c = enhancer_c.enhance(contrast_factor)
+            log.debug(f"      After Contrast Enhance: {repr(temp_img_c)}")
+            if temp_img_c is not adjusted_rgb: safe_close(adjusted_rgb)
+            adjusted_rgb = temp_img_c
+        else:
+            log.debug("    Contrast factor is 1.0, skipping adjustment.")
+        
+        # Восстанавливаем альфа-канал
+        if alpha_channel:
+            log.debug("    Restoring original alpha channel...")
+            if adjusted_rgb and adjusted_rgb.size == alpha_channel.size:
+                 adjusted_rgb.putalpha(alpha_channel)
+                 final_image = adjusted_rgb 
+                 adjusted_rgb = None
+                 log.info(f"--> Brightness/Contrast applied. Final mode: {final_image.mode}")
+            else:
+                 log.error(f"    ! Size mismatch adding alpha or adjusted_rgb is None. Returning RGB.")
+                 final_image = adjusted_rgb # Возвращаем RGB
+                 adjusted_rgb = None
+                 log.info(f"--> Brightness/Contrast partially applied (RGB only due to alpha error). Final mode: {final_image.mode if final_image else 'None'}")
+        else:
+            final_image = adjusted_rgb # Результат - RGB
+            adjusted_rgb = None
+            log.info(f"--> Brightness/Contrast applied. Final mode: {final_image.mode if final_image else 'None'}")
+
+        # Важно: Возвращаем именно final_image
+        return final_image
+
+    except Exception as e:
+        log.error(f"  ! Error applying brightness/contrast: {e}", exc_info=True)
+        return img # Возвращаем оригинал в случае ошибки
+    finally:
+        safe_close(img_copy)
+        safe_close(img_rgb) 
+        safe_close(alpha_channel)
+        # Закрываем adjusted_rgb только если он не стал final_image
+        if adjusted_rgb and adjusted_rgb is not final_image: safe_close(adjusted_rgb)
+# ======================
 
 # === Конец Файла image_utils.py ===
