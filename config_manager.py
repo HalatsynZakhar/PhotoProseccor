@@ -4,6 +4,7 @@ import json
 import os
 import logging
 from typing import Dict, Any, Optional, Tuple, List # Для type hints
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -11,13 +12,24 @@ def get_default_settings() -> Dict[str, Any]:
     """
     Возвращает словарь с настройками по умолчанию для приложения.
     """
+    # Получаем путь к папке "Загрузки" пользователя
+    try:
+        downloads_path = str(Path.home() / "Downloads")
+        default_input = downloads_path
+        default_output = os.path.join(downloads_path, "out")
+        default_backup = os.path.join(downloads_path, "backup")
+    except:
+        default_input = ""
+        default_output = ""
+        default_backup = ""
+
     defaults = {
         # --- Пути ---
         "paths": {
-            "input_folder_path": "",        # Путь к папке источника
-            "output_folder_path": "",       # Путь для результатов (режим отдельных файлов)
-            "backup_folder_path": "",       # Путь для бэкапов (режим отдельных файлов, пусто=выкл)
-            "output_filename": "collage_output.jpg" # Имя файла коллажа (режим коллажа)
+            "input_folder_path": default_input,     # Путь к папке источника
+            "output_folder_path": default_output,    # Путь для результатов (режим отдельных файлов)
+            "backup_folder_path": default_backup,    # Путь для бэкапов (режим отдельных файлов)
+            "output_filename": "collage.jpg"         # Имя файла коллажа (режим коллажа)
         },
 
         # --- Общие настройки обработки (применяются в обоих режимах к отдельным файлам) ---
@@ -143,6 +155,192 @@ def save_settings(settings_dict: Dict[str, Any], filepath: str) -> bool:
     except Exception as e:
         log.error(f"Failed to save settings to '{filepath}': {e}", exc_info=True)
         return False
+
+def save_settings_preset(settings: Dict, preset_name: str) -> bool:
+    """Сохраняет набор настроек с указанным именем."""
+    try:
+        presets_dir = "settings_presets"
+        if not os.path.exists(presets_dir):
+            os.makedirs(presets_dir)
+        
+        preset_file = os.path.join(presets_dir, f"{preset_name}.json")
+        with open(preset_file, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=4, ensure_ascii=False)
+        return True
+    except Exception as e:
+        logging.error(f"Error saving settings preset: {e}")
+        return False
+
+def load_settings_preset(preset_name: str) -> Optional[Dict]:
+    """Загружает набор настроек по имени."""
+    try:
+        preset_file = os.path.join("settings_presets", f"{preset_name}.json")
+        if not os.path.exists(preset_file):
+            return None
+        
+        with open(preset_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Error loading settings preset: {e}")
+        return None
+
+def get_available_presets() -> List[str]:
+    """Возвращает список доступных наборов настроек."""
+    try:
+        presets_dir = "settings_presets"
+        if not os.path.exists(presets_dir):
+            return []
+        
+        presets = [f.replace('.json', '') for f in os.listdir(presets_dir) 
+                  if f.endswith('.json')]
+        return sorted(presets)
+    except Exception as e:
+        logging.error(f"Error getting presets list: {e}")
+        return []
+
+def delete_settings_preset(preset_name: str) -> bool:
+    """Удаляет набор настроек по имени."""
+    try:
+        preset_file = os.path.join("settings_presets", f"{preset_name}.json")
+        if os.path.exists(preset_file):
+            os.remove(preset_file)
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"Error deleting settings preset: {e}")
+        return False
+
+def get_default_preset_settings() -> Dict:
+    """Возвращает настройки по умолчанию для нового набора."""
+    return {
+        "processing_mode_selector": "Обработка отдельных файлов",
+        "paths": {
+            "input_folder_path": "",
+            "output_folder_path": "",
+            "backup_folder_path": "",
+            "output_filename": "collage.jpg"
+        },
+        "preprocessing": {
+            "enable_preresize": False,
+            "preresize_width": 2500,
+            "preresize_height": 2500
+        },
+        "whitening": {
+            "enable_whitening": True,
+            "whitening_cancel_threshold": 550
+        },
+        "background_crop": {
+            "enable_bg_crop": False,
+            "white_tolerance": 0,
+            "crop_symmetric_absolute": False,
+            "crop_symmetric_axes": False
+        },
+        "padding": {
+            "enable_padding": False,
+            "padding_percent": 5.0,
+            "perimeter_margin": 0,
+            "allow_expansion": True
+        },
+        "individual_mode": {
+            "article_name": "",
+            "delete_originals": False,
+            "force_aspect_ratio": None,
+            "max_output_width": 1500,
+            "max_output_height": 1500,
+            "final_exact_width": 0,
+            "final_exact_height": 0,
+            "output_format": "jpg",
+            "jpeg_quality": 95
+        },
+        "collage_mode": {
+            "forced_cols": 0,
+            "spacing_percent": 2.0,
+            "proportional_placement": False,
+            "placement_ratios": [1.0],
+            "force_collage_aspect_ratio": None,
+            "max_collage_width": 1500,
+            "max_collage_height": 1500,
+            "final_collage_exact_width": 0,
+            "final_collage_exact_height": 0,
+            "output_format": "jpg",
+            "jpeg_quality": 95
+        }
+    }
+
+def create_default_preset() -> bool:
+    """Создает набор настроек по умолчанию, если он еще не существует."""
+    try:
+        presets_dir = "settings_presets"
+        if not os.path.exists(presets_dir):
+            os.makedirs(presets_dir)
+        
+        default_preset_file = os.path.join(presets_dir, "Настройки по умолчанию.json")
+        if not os.path.exists(default_preset_file):
+            with open(default_preset_file, 'w', encoding='utf-8') as f:
+                json.dump(get_default_preset_settings(), f, indent=4, ensure_ascii=False)
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"Error creating default preset: {e}")
+        return False
+
+def rename_settings_preset(old_name: str, new_name: str) -> bool:
+    """Переименовывает набор настроек."""
+    try:
+        if old_name == "Настройки по умолчанию":
+            return False
+            
+        old_file = os.path.join("settings_presets", f"{old_name}.json")
+        new_file = os.path.join("settings_presets", f"{new_name}.json")
+        
+        if not os.path.exists(old_file) or os.path.exists(new_file):
+            return False
+            
+        # Загружаем настройки из старого файла
+        with open(old_file, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+            
+        # Сохраняем в новый файл
+        with open(new_file, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=4, ensure_ascii=False)
+            
+        # Удаляем старый файл
+        os.remove(old_file)
+        return True
+    except Exception as e:
+        logging.error(f"Error renaming settings preset: {e}")
+        return False
+
+def delete_all_custom_presets() -> Optional[int]:
+    """Удаляет все файлы пресетов из папки 'settings_presets', кроме 'Настройки по умолчанию.json'.
+    Возвращает количество удаленных файлов или None в случае ошибки.
+    """
+    presets_dir = "settings_presets"
+    default_preset_filename = "Настройки по умолчанию.json"
+    deleted_count = 0
+    try:
+        if not os.path.exists(presets_dir):
+            log.info("Presets directory doesn't exist, nothing to delete.")
+            return 0 # Папки нет, значит 0 удалено
+        
+        for filename in os.listdir(presets_dir):
+            if filename.endswith('.json') and filename != default_preset_filename:
+                file_path = os.path.join(presets_dir, filename)
+                try:
+                    os.remove(file_path)
+                    log.info(f"Deleted preset file: {file_path}")
+                    deleted_count += 1
+                except Exception as e_inner:
+                    log.error(f"Failed to delete preset file '{file_path}': {e_inner}")
+                    # Продолжаем удалять остальные, но вернем None в конце
+                    return None # Если хотя бы один файл удалить не удалось, считаем операцию неуспешной
+        
+        log.info(f"Successfully deleted {deleted_count} custom preset files.")
+        return deleted_count
+
+    except Exception as e:
+        log.error(f"Error deleting custom presets: {e}", exc_info=True)
+        return None
 
 # Пример использования (не будет выполняться при импорте)
 if __name__ == "__main__":

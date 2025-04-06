@@ -18,7 +18,7 @@ except ImportError:
     logging.warning("Библиотека natsort не найдена. Сортировка будет стандартной.")
     natsorted = sorted
 
-from PIL import Image, UnidentifiedImageError, ImageFile
+from PIL import Image, UnidentifiedImageError, ImageFile, ImageDraw, ImageFont
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 log = logging.getLogger(__name__) # Используем логгер, настроенный в app.py
@@ -182,42 +182,161 @@ def _apply_final_canvas_or_prepare(img, exact_width, exact_height, output_format
 def _save_image(img, output_path, output_format, jpeg_quality):
     """(Helper) Сохраняет изображение в указанном формате с опциями."""
     if not img: log.error("! Cannot save None image."); return False
-    # ... (код функции _save_image из предыдущего ответа, с log.*) ...
-    if img.size[0] <= 0 or img.size[1] <= 0: log.error(f"! Cannot save zero-size image {img.size} to {output_path}"); return False
+    
+    log.info(f"_save_image called with output_path={output_path}, format={output_format}")
+    
+    if img.size[0] <= 0 or img.size[1] <= 0: 
+        log.error(f"! Cannot save zero-size image {img.size} to {output_path}")
+        return False
+    
     log.info(f"  > Saving image to {output_path} (Format: {output_format.upper()})")
     log.debug(f"    Image details before save: Mode={img.mode}, Size={img.size}")
-    try:
-        save_options = {"optimize": True}
-        img_to_save = img
-        must_close_img_to_save = False
-        if output_format == 'jpg':
-            format_name = "JPEG"
-            save_options["quality"] = int(jpeg_quality) # Убедимся что int
-            save_options["subsampling"] = 0
-            save_options["progressive"] = True
-            if img.mode != 'RGB':
-                log.warning(f"    Mode is {img.mode}, converting to RGB for JPEG save.")
+    
+    output_dir = os.path.dirname(output_path)
+    if not os.path.isdir(output_dir):
+        log.error(f"  ! Output directory does not exist: {output_dir}")
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            log.info(f"Created output directory: {output_dir}")
+        except Exception as e:
+            log.error(f"Failed to create output directory: {e}")
+            return False
+    
+    if not os.access(output_dir, os.W_OK):
+        log.error(f"  ! No write permission for output directory: {output_dir}")
+        return False
+    
+    log.debug(f"    Output directory exists and seems writable: {output_dir}")
+    
+    save_options = {"optimize": True}
+    img_to_save = img
+    must_close_img_to_save = False
+    
+    if output_format == 'jpg':
+        format_name = "JPEG"
+        save_options["quality"] = int(jpeg_quality)
+        save_options["subsampling"] = 0
+        save_options["progressive"] = True
+        if img.mode != 'RGB':
+            log.warning(f"    Mode is {img.mode}, converting to RGB for JPEG save.")
+            try: # Добавим try-except на случай ошибки конвертации
                 img_to_save = img.convert('RGB')
                 must_close_img_to_save = True
-        elif output_format == 'png':
-            format_name = "PNG"
-            save_options["compress_level"] = 6
-            if img.mode != 'RGBA':
-                log.warning(f"    Mode is {img.mode}, converting to RGBA for PNG save.")
+            except Exception as convert_err:
+                 log.error(f"  ! Failed to convert image to RGB for JPEG save: {convert_err}")
+                 return False # Не можем сохранить, если конвертация не удалась
+    elif output_format == 'png':
+        format_name = "PNG"
+        save_options["compress_level"] = 6
+        if img.mode != 'RGBA':
+            log.warning(f"    Mode is {img.mode}, converting to RGBA for PNG save.")
+            try: # Добавим try-except
                 img_to_save = img.convert('RGBA')
                 must_close_img_to_save = True
-        else: log.error(f"! Unsupported output format for saving: {output_format}"); return False
-
-        img_to_save.save(output_path, format_name, **save_options)
-        if must_close_img_to_save: image_utils.safe_close(img_to_save)
-        log.info(f"    Successfully saved: {os.path.basename(output_path)}")
-        return True
-    except Exception as e:
-        log.error(f"  ! Failed to save image {os.path.basename(output_path)}: {e}", exc_info=True)
-        if os.path.exists(output_path):
-            try: os.remove(output_path); log.warning(f"    Removed partially saved file: {os.path.basename(output_path)}")
-            except Exception as del_err: log.error(f"    ! Failed to remove partially saved file: {del_err}")
+            except Exception as convert_err:
+                 log.error(f"  ! Failed to convert image to RGBA for PNG save: {convert_err}")
+                 return False
+    else: 
+        log.error(f"! Unsupported output format for saving: {output_format}")
+        if must_close_img_to_save: image_utils.safe_close(img_to_save) # Закрываем временный объект, если создали
         return False
+
+    # --- ПЕРВАЯ ПОПЫТКА: Стандартное сохранение ---
+    save_success = False
+    file_size_after_save = -1
+    try:
+        log.info(f"  > First attempt: Standard save for {os.path.basename(output_path)}")
+        img_to_save.save(output_path, format_name, **save_options)
+        if os.path.isfile(output_path):
+            try: file_size_after_save = os.path.getsize(output_path)
+            except Exception: file_size_after_save = -2
+            if file_size_after_save > 0:
+                save_success = True
+                log.info(f"  > Standard save SUCCESSFUL. File exists: True, Size: {file_size_after_save} bytes")
+            else:
+                 log.warning(f"  > Standard save completed, but file size is {file_size_after_save}. Marking as FAILED.")
+        else:
+             log.warning(f"  > Standard save completed, but file not found immediately after save. Marking as FAILED.")
+
+    except Exception as e:
+        log.error(f"  ! Error during standard save: {e}")
+    
+    # --- ВТОРАЯ ПОПЫТКА: Сохранение во временную папку ---
+    if not save_success:
+        file_size_after_save = -1
+        temp_path = None
+        try:
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            temp_filename = f"temp_img_save_{int(time.time())}_{os.path.basename(output_path)}"
+            temp_path = os.path.join(temp_dir, temp_filename)
+            
+            log.info(f"  > Second attempt: Saving to temp file {temp_path}")
+            
+            img_to_save.save(temp_path, format_name, **save_options)
+            
+            if os.path.isfile(temp_path):
+                log.info(f"  > Temp file saved successfully. Copying to final destination: {output_path}")
+                import shutil
+                shutil.copy2(temp_path, output_path)
+                if os.path.isfile(output_path):
+                    try: file_size_after_save = os.path.getsize(output_path)
+                    except Exception: file_size_after_save = -2
+                    if file_size_after_save > 0:
+                        save_success = True
+                        log.info(f"  > Temp file copy SUCCESSFUL. File exists: True, Size: {file_size_after_save} bytes")
+                    else:
+                        log.warning(f"  > Temp file copy completed, but final file size is {file_size_after_save}. Marking as FAILED.")
+                else:
+                    log.warning(f"  > Temp file copy completed, but final file not found. Marking as FAILED.")
+            else:
+                log.error(f"  ! Temp file not created at {temp_path}")
+        except Exception as e:
+            log.error(f"  ! Error during temp file save/copy: {e}")
+        finally:
+             if temp_path and os.path.exists(temp_path):
+                try: os.remove(temp_path)
+                except Exception as del_err:
+                     log.warning(f"  ! Could not delete temp file {temp_path}: {del_err}")
+    
+    # --- ТРЕТЬЯ ПОПЫТКА: Прямая запись в байтовый поток ---
+    if not save_success:
+        file_size_after_save = -1
+        try:
+            log.info(f"  > Third attempt: BytesIO save and write")
+            from io import BytesIO
+            img_byte_arr = BytesIO()
+            img_to_save.save(img_byte_arr, format=format_name, **save_options)
+            img_byte_arr.seek(0)
+            with open(output_path, 'wb') as f:
+                f.write(img_byte_arr.getvalue())
+            if os.path.isfile(output_path):
+                try: file_size_after_save = os.path.getsize(output_path)
+                except Exception: file_size_after_save = -2
+                if file_size_after_save > 0:
+                    save_success = True
+                    log.info(f"  > BytesIO save SUCCESSFUL. File exists: True, Size: {file_size_after_save} bytes")
+                else:
+                    log.warning(f"  > BytesIO save completed, but file size is {file_size_after_save}. Marking as FAILED.")
+            else:
+                 log.warning(f"  > BytesIO save completed, but file not found. Marking as FAILED.")
+        except Exception as e:
+            log.error(f"  ! Error during BytesIO save: {e}")
+    
+    if must_close_img_to_save: image_utils.safe_close(img_to_save)
+    
+    if not save_success:
+        log.error(f"  ! All save attempts failed for {output_path}")
+        if os.path.isfile(output_path):
+            try:
+                size = os.path.getsize(output_path)
+                if size <= 0:
+                     log.warning(f"    Removing zero-byte file artifact: {output_path}")
+                     os.remove(output_path)
+            except Exception: pass 
+        return False
+    
+    return True 
 
 # ==============================================================================
 # === ОСНОВНАЯ ФУНКЦИЯ: ОБРАБОТКА ОТДЕЛЬНЫХ ФАЙЛОВ =============================
@@ -441,7 +560,7 @@ def run_individual_processing(**all_settings: Dict[str, Any]):
 
             if apply_padding:
                 img_original = img_current
-                img_current = image_utils.add_padding(img_current, padding_percent)
+                img_current = image_utils.add_padding(img_current, padding_percent, bg_color=(0, 0, 0, 0))
                 if not img_current: raise ValueError("Image became None after padding.")
                 if img_current is not img_original: log.info(f"    Padding applied. New size: {img_current.size}")
             step_counter += 1
@@ -646,7 +765,8 @@ def _process_image_for_collage(image_path: str, prep_settings, white_settings, b
              else: log.debug("    Padding skipped (zero size)")
 
         if apply_padding:
-            img_current = image_utils.add_padding(img_current, padding_percent)
+            img_original = img_current
+            img_current = image_utils.add_padding(img_current, padding_percent, bg_color=(0, 0, 0, 0))
             if not img_current: return None
             log.debug(f"    Padding applied. New size: {img_current.size}")
 
@@ -666,203 +786,255 @@ def _process_image_for_collage(image_path: str, prep_settings, white_settings, b
 
 def run_collage_processing(**all_settings: Dict[str, Any]):
     """
-    Создает коллаж из обработанных изображений.
+    Создает коллаж из изображений в указанной папке.
+
+    Параметры берутся из словаря all_settings, который содержит:
+    - paths.input_folder_path: путь к папке с исходными изображениями
+    - paths.output_filename: имя файла для сохранения коллажа
+    - collage_mode.*: различные настройки для создания коллажа
+    - preprocessing.*, whitening.*, background_crop.*, padding.*: настройки для обработки отдельных изображений перед коллажем
     """
     log.info("--- Starting Collage Processing ---")
     start_time = time.time()
 
-    # --- 1. Извлечение и Валидация Параметров ---
-    log.debug("Extracting settings for collage mode...")
     try:
+        # --- 1. Извлечение параметров ---
         paths_settings = all_settings.get('paths', {})
+        collage_settings = all_settings.get('collage_mode', {})
         prep_settings = all_settings.get('preprocessing', {})
-        white_settings = all_settings.get('whitening', {})
+        white_settings = all_settings.get('whitening', {}) # Добавлено извлечение настроек отбеливания
         bgc_settings = all_settings.get('background_crop', {})
         pad_settings = all_settings.get('padding', {})
-        coll_settings = all_settings.get('collage_mode', {})
 
-        source_dir = paths_settings.get('input_folder_path')
-        output_filename = paths_settings.get('output_filename')
+        source_dir = paths_settings.get('input_folder_path', '')
+        output_filename = paths_settings.get('output_filename', '')
 
-        proportional_placement = coll_settings.get('proportional_placement', False)
-        placement_ratios = coll_settings.get('placement_ratios', [1.0])
-        forced_cols = int(coll_settings.get('forced_cols', 0))
-        spacing_percent = float(coll_settings.get('spacing_percent', 2.0))
-        force_collage_aspect_ratio = coll_settings.get('force_collage_aspect_ratio')
-        max_collage_width = int(coll_settings.get('max_collage_width', 0))
-        max_collage_height = int(coll_settings.get('max_collage_height', 0))
-        final_collage_exact_width = int(coll_settings.get('final_collage_exact_width', 0))
-        final_collage_exact_height = int(coll_settings.get('final_collage_exact_height', 0))
-        output_format = str(coll_settings.get('output_format', 'jpg')).lower()
-        jpg_background_color = coll_settings.get('jpg_background_color', [255, 255, 255])
-        jpeg_quality = int(coll_settings.get('jpeg_quality', 95))
+        # Получаем другие параметры из настроек коллажа
+        output_format = str(collage_settings.get('output_format', 'jpg')).lower()
+        jpeg_quality = int(collage_settings.get('jpeg_quality', 95))
+        forced_cols = int(collage_settings.get('forced_cols', 0))
+        spacing_percent = float(collage_settings.get('spacing_percent', 2.0))
+        bg_color_tuple = tuple(collage_settings.get('jpg_background_color', [255, 255, 255]))
 
-        if not source_dir or not output_filename: raise ValueError("Source directory or output filename missing.")
-        if output_format not in ['jpg', 'png']: raise ValueError(f"Unsupported collage output format: {output_format}")
+        # Параметры для финальной обработки коллажа
+        force_collage_aspect_ratio = collage_settings.get('force_collage_aspect_ratio', None)
+        max_collage_width = int(collage_settings.get('max_collage_width', 0))
+        max_collage_height = int(collage_settings.get('max_collage_height', 0))
+        final_collage_exact_width = int(collage_settings.get('final_collage_exact_width', 0))
+        final_collage_exact_height = int(collage_settings.get('final_collage_exact_height', 0))
 
-        valid_jpg_bg = tuple(jpg_background_color) if isinstance(jpg_background_color, list) else (255, 255, 255)
-        valid_collage_aspect_ratio = tuple(force_collage_aspect_ratio) if force_collage_aspect_ratio else None
+        log.info(f"Parameters: source_dir={source_dir}, output_filename={output_filename}, format={output_format}")
 
-        log.debug("Collage settings extracted.")
+        # Проверка наличия обязательных параметров
+        if not source_dir or not output_filename:
+            error_msg = "Source directory or output filename missing"
+            log.error(error_msg)
+            raise ValueError(error_msg)
 
-    except (KeyError, ValueError, TypeError) as e:
-        log.critical(f"Error processing collage settings: {e}. Aborting.", exc_info=True)
-        return
+        # --- 2. Подготовка путей ---
+        # Стандартизируем имя выходного файла
+        base_name = os.path.splitext(output_filename)[0]
+        file_ext = ".jpg" if output_format == "jpg" else ".png"
+        output_filename = base_name + file_ext
 
-    # --- 2. Подготовка Путей ---
-    abs_source_dir = os.path.abspath(source_dir)
-    if not os.path.isdir(abs_source_dir): log.error(f"Source directory not found: {abs_source_dir}"); return
-    # Имя файла коллажа будет внутри папки источника
-    output_file_path = os.path.abspath(os.path.join(abs_source_dir, output_filename))
-    if os.path.isdir(output_file_path): log.error(f"Output filename points to a directory: {output_file_path}"); return
+        # Создаем абсолютные пути
+        abs_source_dir = os.path.abspath(source_dir)
+        output_path = os.path.join(abs_source_dir, output_filename)
 
-    # --- 3. Логирование Параметров ---
-    log.info("--- Processing Parameters (Collage Mode) ---")
-    log.info(f"Source Directory: {abs_source_dir}")
-    log.info(f"Output Filename: {output_filename} (Path: {output_file_path})")
-    log.info(f"Output Format: {output_format.upper()}")
-    if output_format == 'jpg': log.info(f"  JPG Bg: {valid_jpg_bg}, Quality: {jpeg_quality}")
-    log.info("-" * 10 + " Base Image Processing " + "-" * 10)
-    log.info(f"Preresize: {'Enabled' if prep_settings.get('enable_preresize') else 'Disabled'}")
-    log.info(f"Whitening: {'Enabled' if white_settings.get('enable_whitening') else 'Disabled'}")
-    log.info(f"BG Removal/Crop: {'Enabled' if bgc_settings.get('enable_bg_crop') else 'Disabled'}")
-    log.info(f"Padding: {'Enabled' if pad_settings.get('enable_padding') else 'Disabled'}")
-    log.info("-" * 10 + " Collage Assembly " + "-" * 10)
-    log.info(f"Proportional Placement: {proportional_placement} (Ratios: {placement_ratios if proportional_placement else 'N/A'})")
-    log.info(f"Columns: {forced_cols if forced_cols > 0 else 'Auto'}")
-    log.info(f"Spacing: {spacing_percent}%")
-    log.info(f"Force Aspect Ratio: {str(valid_collage_aspect_ratio) or 'Disabled'}")
-    log.info(f"Max Dimensions: W:{max_collage_width or 'N/A'}, H:{max_collage_height or 'N/A'}")
-    log.info(f"Final Exact Canvas: W:{final_collage_exact_width or 'N/A'}, H:{final_collage_exact_height or 'N/A'}")
-    log.info("-" * 25)
+        log.info(f"Input folder: {abs_source_dir}")
+        log.info(f"Output path: {output_path}")
 
-    # --- 4. Поиск Файлов ---
-    log.info(f"Searching for images (excluding output file)...")
-    input_files_found = []
-    SUPPORTED_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.webp', '.tif')
-    try:
-        for entry in os.listdir(abs_source_dir):
-            entry_path = os.path.join(abs_source_dir, entry)
-            # Проверяем, что это файл, имеет нужное расширение и не является выходным файлом
-            if os.path.isfile(entry_path) and \
-               entry.lower().endswith(SUPPORTED_EXTENSIONS) and \
-               os.path.normcase(entry_path) != os.path.normcase(output_file_path):
-                input_files_found.append(entry_path)
+        # --- 3. Проверка директорий и прав доступа ---
+        if not os.path.isdir(abs_source_dir):
+            error_msg = f"Source directory not found: {abs_source_dir}"
+            log.error(error_msg)
+            raise ValueError(error_msg) # Используем ValueError для консистентности
 
-        if not input_files_found: log.error("No suitable image files found."); return
-        input_files_sorted = natsorted(input_files_found)
-        log.info(f"Found {len(input_files_sorted)} images for collage.")
-    except Exception as e: log.error(f"Error searching for files: {e}"); return
+        # Проверка прав на запись
+        try:
+            test_file = os.path.join(abs_source_dir, "_test_permissions.txt")
+            with open(test_file, 'w') as f:
+                f.write("Test write permission")
+            os.remove(test_file)
+            log.info("Test file created and removed successfully")
+        except Exception as e:
+            error_msg = f"Permission test failed in '{abs_source_dir}': {e}" # Уточняем папку
+            log.error(error_msg)
+            raise PermissionError(error_msg) # Перебрасываем как PermissionError
 
+        # --- 4. Сбор и обработка изображений ---
+        supported_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
+        image_files = [f for f in os.listdir(abs_source_dir)
+                     if os.path.isfile(os.path.join(abs_source_dir, f))
+                     and f.lower().endswith(supported_extensions)
+                     and not f.startswith("_test_") # Игнорируем тестовые файлы
+                     and os.path.normcase(os.path.join(abs_source_dir, f)) != os.path.normcase(output_path)] # Игнорируем сам будущий коллаж
 
-    # --- 5. Обработка Индивидуальных Изображений ---
-    processed_images: List[Image.Image] = []
-    log.info("--- Processing individual images for collage ---")
-    total_files_coll = len(input_files_sorted)
-    for idx, path in enumerate(input_files_sorted):
-        log.info(f"-> Processing {idx+1}/{total_files_coll}: {os.path.basename(path)}")
-        # Передаем только нужные секции настроек
-        processed = _process_image_for_collage(
-            image_path=path,
-            prep_settings=prep_settings,
-            white_settings=white_settings,
-            bgc_settings=bgc_settings,
-            pad_settings=pad_settings
-        )
-        if processed: processed_images.append(processed)
-        else: log.warning(f"  Skipping {os.path.basename(path)} due to processing errors.")
+        if not image_files:
+            error_msg = f"No suitable image files found in {abs_source_dir}"
+            log.error(error_msg)
+            raise ValueError(error_msg)
 
-    num_processed = len(processed_images)
-    if num_processed == 0: log.error("No images successfully processed for collage."); return
-    log.info(f"--- Successfully processed {num_processed} images. Starting assembly... ---")
+        # Сортируем файлы
+        try:
+            image_files = natsorted(image_files)
+            log.info(f"Found {len(image_files)} image files (natsorted) for processing")
+        except NameError:
+             image_files = sorted(image_files)
+             log.info(f"Found {len(image_files)} image files (standard sorted) for processing")
 
+        # Обрабатываем каждое изображение
+        processed_images = []
+        log.info("Starting individual image processing for collage...")
 
-    # --- 6. Пропорциональное Масштабирование (опц.) ---
-    scaled_images: List[Image.Image] = []
-    if proportional_placement and num_processed > 0:
-        # ... (логика масштабирования с логированием как в предыдущем ответе) ...
-        log.info("Applying proportional scaling...")
-        base_img = processed_images[0]; base_w, base_h = base_img.size
-        if base_w > 0 and base_h > 0:
-            log.debug(f"  Base size: {base_w}x{base_h}")
-            ratios = placement_ratios if placement_ratios else [1.0] * num_processed
-            for i, img in enumerate(processed_images):
-                 temp_img = None; current_w, current_h = img.size; target_w, target_h = base_w, base_h
-                 if i < len(ratios):
-                      try: ratio = max(0.01, float(ratios[i])); target_w, target_h = int(round(base_w*ratio)), int(round(base_h*ratio))
-                      except: pass # ignore ratio error
-                 if current_w > 0 and current_h > 0 and target_w > 0 and target_h > 0:
-                      scale = min(target_w / current_w, target_h / current_h)
-                      nw, nh = max(1, int(round(current_w * scale))), max(1, int(round(current_h * scale)))
-                      if nw != current_w or nh != current_h:
-                           try:
-                               log.debug(f"  Scaling image {i+1} ({current_w}x{current_h} -> {nw}x{nh})")
-                               temp_img = img.resize((nw, nh), Image.Resampling.LANCZOS); scaled_images.append(temp_img); image_utils.safe_close(img)
-                           except Exception as e_scale: log.error(f"  ! Error scaling image {i+1}: {e_scale}"); scaled_images.append(img)
-                      else: scaled_images.append(img)
-                 else: scaled_images.append(img)
-            processed_images = []
-        else: log.error("  Base image zero size. Scaling skipped."); scaled_images = processed_images; processed_images = []
-    else: log.info("Proportional scaling disabled or no images."); scaled_images = processed_images; processed_images = []
+        for i, img_file in enumerate(image_files):
+            img_path = os.path.join(abs_source_dir, img_file)
+            log.info(f"Processing image {i+1}/{len(image_files)}: {img_file}")
 
+            try:
+                # Вызываем _process_image_for_collage
+                processed_img = _process_image_for_collage(
+                    image_path=img_path,
+                    prep_settings=prep_settings,
+                    white_settings=white_settings, # Передаем настройки отбеливания
+                    bgc_settings=bgc_settings,
+                    pad_settings=pad_settings
+                )
 
-    # --- 7. Сборка Коллажа ---
-    num_final_images = len(scaled_images)
-    if num_final_images == 0: log.error("No images left after scaling."); return
-    log.info(f"--- Assembling collage ({num_final_images} images) ---")
-    # ... (логика расчета сетки, отступов, создания холста и вставки с логированием) ...
-    grid_cols = forced_cols if forced_cols > 0 else max(1, int(math.ceil(math.sqrt(num_final_images))))
-    grid_rows = max(1, int(math.ceil(num_final_images / grid_cols)))
-    max_w = max((img.width for img in scaled_images if img), default=1)
-    max_h = max((img.height for img in scaled_images if img), default=1)
-    spacing_px_h = int(round(max_w * (spacing_percent / 100.0)))
-    spacing_px_v = int(round(max_h * (spacing_percent / 100.0)))
-    canvas_width = (grid_cols * max_w) + ((grid_cols + 1) * spacing_px_h)
-    canvas_height = (grid_rows * max_h) + ((grid_rows + 1) * spacing_px_v)
-    log.debug(f"  Grid: {grid_rows}x{grid_cols}, Cell: {max_w}x{max_h}, Space H/V: {spacing_px_h}/{spacing_px_v}, Canvas: {canvas_width}x{canvas_height}")
+                if processed_img:
+                    processed_images.append(processed_img)
+                    log.info(f"  > Successfully processed: {img_file} -> new size {processed_img.size}")
+                else:
+                    log.warning(f"  ! Failed to process image {img_file}, skipping.")
 
-    collage_canvas = None; final_collage = None
-    try:
-        collage_canvas = Image.new('RGBA', (canvas_width, canvas_height), (0, 0, 0, 0))
-        current_idx = 0
-        for r in range(grid_rows):
-            for c in range(grid_cols):
-                if current_idx >= num_final_images: break
-                img = scaled_images[current_idx]
-                if img and img.width > 0 and img.height > 0:
-                     px = spacing_px_h + c * (max_w + spacing_px_h); py = spacing_px_v + r * (max_h + spacing_px_v)
-                     paste_x = px + (max_w - img.width) // 2; paste_y = py + (max_h - img.height) // 2
-                     try: collage_canvas.paste(img, (paste_x, paste_y), mask=img)
-                     except Exception as e_paste: log.error(f"  ! Error pasting image {current_idx+1}: {e_paste}")
-                current_idx += 1
-            if current_idx >= num_final_images: break
-        log.info("  Images placed on collage canvas.")
-        for img in scaled_images: image_utils.safe_close(img) # Закрываем исходники
-        scaled_images = []
-        final_collage = collage_canvas; collage_canvas = None
+            except Exception as e:
+                log.error(f"  ! Critical error processing image {img_file}: {e}", exc_info=True)
+                # Продолжаем со следующими файлами
 
-        # --- 8. Трансформации Коллажу ---
-        log.info("--- Applying transformations to collage ---")
-        if valid_collage_aspect_ratio: final_collage = _apply_force_aspect_ratio(final_collage, valid_collage_aspect_ratio)
-        if not final_collage: raise ValueError("Collage None after aspect ratio.")
-        if max_collage_width > 0 or max_collage_height > 0: final_collage = _apply_max_dimensions(final_collage, max_collage_width, max_collage_height)
-        if not final_collage: raise ValueError("Collage None after max dimensions.")
-        final_collage = _apply_final_canvas_or_prepare(final_collage, final_collage_exact_width, final_collage_exact_height, output_format, valid_jpg_bg)
-        if not final_collage: raise ValueError("Collage None after final canvas/prepare.")
+        if not processed_images:
+            error_msg = "No images could be processed for the collage"
+            log.error(error_msg)
+            raise ValueError(error_msg)
 
-        # --- 9. Сохранение Коллажа ---
-        log.info("--- Saving final collage ---")
-        save_successful = _save_image(final_collage, output_file_path, output_format, jpeg_quality)
-        if save_successful: log.info(f"--- Collage processing finished successfully! Saved to {output_file_path} ---")
-        else: log.error("--- Collage processing failed during final save. ---")
+        log.info(f"Successfully processed {len(processed_images)} images for the collage.")
 
-    except Exception as e: log.critical(f"!!! Error during collage assembly/transform/save: {e}", exc_info=True)
-    finally:
-        log.debug("Cleaning up collage resources...")
-        image_utils.safe_close(collage_canvas); image_utils.safe_close(final_collage)
-        for img in processed_images: image_utils.safe_close(img) # На всякий случай
-        for img in scaled_images: image_utils.safe_close(img) # На всякий случай
+        # --- 5. Определение размеров коллажа ---
+        num_images_for_collage = len(processed_images)
+        cols = forced_cols if forced_cols > 0 else int(pow(num_images_for_collage, 0.5) + 0.5)
+        rows = (num_images_for_collage + cols - 1) // cols
+        log.info(f"Grid size for collage: {cols}x{rows}")
 
-    total_time = time.time() - start_time
-    log.info(f"Total collage processing time: {total_time:.2f} seconds")
-    log.info("--- Collage Processing Function Finished ---")
+        max_width = max(img.width for img in processed_images) if processed_images else 1
+        max_height = max(img.height for img in processed_images) if processed_images else 1
+        log.info(f"Max cell dimensions from processed images: {max_width}x{max_height}")
+
+        spacing_px = int(max(max_width, max_height) * (spacing_percent / 100.0))
+        collage_width = cols * max_width + (cols + 1) * spacing_px
+        collage_height = rows * max_height + (rows + 1) * spacing_px
+        log.info(f"Creating collage canvas: {collage_width}x{collage_height}, cell: {max_width}x{max_height}, spacing: {spacing_px}px")
+
+        # --- 6. Создание коллажа ---
+        collage_mode = 'RGBA' if output_format == 'png' else 'RGB'
+        collage_bg = (0, 0, 0, 0) if collage_mode == 'RGBA' else bg_color_tuple
+        collage = Image.new(collage_mode, (collage_width, collage_height), collage_bg)
+
+        for i, img in enumerate(processed_images):
+            row = i // cols
+            col = i % cols
+            x = spacing_px + col * (max_width + spacing_px)
+            y = spacing_px + row * (max_height + spacing_px)
+            x_offset = (max_width - img.width) // 2
+            y_offset = (max_height - img.height) // 2
+            paste_pos = (x + x_offset, y + y_offset)
+            log.debug(f"Pasting image {i} (size {img.size}) at {paste_pos} on canvas {collage.size}")
+
+            try:
+                paste_mask = None
+                image_to_paste = img
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    try:
+                         paste_mask = img.getchannel('A')
+                         if collage_mode == 'RGB':
+                              temp_bg_patch = Image.new('RGB', img.size, bg_color_tuple)
+                              temp_bg_patch.paste(img, (0,0), mask=paste_mask)
+                              image_to_paste = temp_bg_patch
+                              paste_mask = None
+                         log.debug(f"  Using alpha mask for image {i}")
+                    except ValueError:
+                         log.debug(f"  Image {i} is {img.mode} but has no alpha channel?")
+                         if collage_mode == 'RGB' and img.mode != 'RGB': image_to_paste = img.convert('RGB')
+                         elif collage_mode == 'RGBA' and img.mode != 'RGBA': image_to_paste = img.convert('RGBA')
+                elif collage_mode == 'RGB' and img.mode != 'RGB': image_to_paste = img.convert('RGB')
+                elif collage_mode == 'RGBA' and img.mode != 'RGBA': image_to_paste = img.convert('RGBA')
+
+                collage.paste(image_to_paste, paste_pos, mask=paste_mask)
+                if image_to_paste is not img: image_utils.safe_close(image_to_paste)
+
+            except Exception as e:
+                log.warning(f"Error pasting processed image {i}: {e}", exc_info=True)
+
+        for img in processed_images: image_utils.safe_close(img) # Закрываем обработанные
+
+        # --- 7. Финальная обработка коллажа ---
+        log.info("Applying final adjustments to the generated collage...")
+
+        if force_collage_aspect_ratio:
+             collage = _apply_force_aspect_ratio(collage, force_collage_aspect_ratio)
+             if not collage: raise ValueError("Collage became None after force aspect ratio")
+             log.info(f"Collage size after aspect ratio: {collage.size}")
+
+        if max_collage_width > 0 or max_collage_height > 0:
+             collage = _apply_max_dimensions(collage, max_collage_width, max_collage_height)
+             if not collage: raise ValueError("Collage became None after max dimensions")
+             log.info(f"Collage size after max dimensions: {collage.size}")
+
+        collage = _apply_final_canvas_or_prepare(collage,
+                                                 final_collage_exact_width,
+                                                 final_collage_exact_height,
+                                                 output_format,
+                                                 bg_color_tuple)
+        if not collage:
+            error_msg = "Collage became None after final canvas/prepare step"
+            log.error(error_msg)
+            raise ValueError(error_msg)
+        log.info(f"Collage size after final canvas/prepare: {collage.size}, Mode: {collage.mode}")
+
+        # --- 8. Сохранение финального коллажа ---
+        log.info(f"Attempting to save final collage to {output_path}")
+        save_success = _save_image(collage, output_path, output_format, jpeg_quality)
+        image_utils.safe_close(collage) # Закрываем финальный коллаж
+
+        # === ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА ПОСЛЕ ВЫЗОВА _save_image ===
+        final_check_passed = False
+        if save_success:
+            log.info("  _save_image reported SUCCESS. Performing final verification...")
+            try:
+                if os.path.isfile(output_path):
+                    final_size = os.path.getsize(output_path)
+                    if final_size > 0:
+                        final_check_passed = True
+                        log.info(f"  FINAL CHECK PASSED: File '{os.path.basename(output_path)}' exists and size is {final_size} bytes.")
+                    else:
+                        log.error(f"  FINAL CHECK FAILED: File '{os.path.basename(output_path)}' exists BUT size is {final_size} bytes!")
+                else:
+                    log.error(f"  FINAL CHECK FAILED: File '{os.path.basename(output_path)}' does NOT exist after _save_image reported success!")
+            except Exception as final_check_err:
+                 log.error(f"  FINAL CHECK ERROR: Error checking file status: {final_check_err}")
+        else:
+            log.warning("  _save_image reported FAILURE. Skipping final verification.")
+
+        # --- 9. Завершение и отчет ---
+        if final_check_passed: # Используем результат финальной проверки
+            log.info("--- Collage processing completed successfully! ---")
+        else:
+            error_msg = "Collage processing failed (or file invalid) after save attempts."
+            log.error(error_msg) # Изменено с info на error
+            raise RuntimeError(error_msg) # Оставим raise, чтобы app.py показал ошибку
+
+        log.info(f"Total collage processing time: {time.time() - start_time:.2f} seconds")
+
+    except Exception as e:
+        log.critical(f"!!! UNEXPECTED error in collage processing: {e}", exc_info=True)
+        import traceback
+        traceback.print_exc()
+        raise

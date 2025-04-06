@@ -1,0 +1,56 @@
+{
+    "processing_mode_selector": "Обработка отдельных файлов",
+    "paths": {
+        "input_folder_path": "",
+        "output_folder_path": "",
+        "backup_folder_path": "",
+        "output_filename": "collage.jpg"
+    },
+    "preprocessing": {
+        "enable_preresize": false,
+        "preresize_width": 0,
+        "preresize_height": 0
+    },
+    "whitening": {
+        "enable_whitening": true,
+        "whitening_cancel_threshold": 550
+    },
+    "background_crop": {
+        "enable_bg_crop": false,
+        "white_tolerance": 0,
+        "crop_symmetric_absolute": false,
+        "crop_symmetric_axes": false
+    },
+    "padding": {
+        "enable_padding": false,
+        "padding_percent": 0.0,
+        "perimeter_margin": 0,
+        "allow_expansion": false
+    },
+    "individual_mode": {
+        "article_name": "",
+        "delete_originals": false,
+        "force_aspect_ratio": null,
+        "max_output_width": 1500,
+        "max_output_height": 1500,
+        "final_exact_width": 0,
+        "final_exact_height": 0,
+        "output_format": "jpg",
+        "jpeg_quality": 95
+    },
+    "collage_mode": {
+        "forced_cols": 10,
+        "spacing_percent": 2.0,
+        "proportional_placement": false,
+        "placement_ratios": [
+            1.0
+        ],
+        "force_collage_aspect_ratio": null,
+        "max_collage_width": 1500,
+        "max_collage_height": 1500,
+        "final_collage_exact_width": 0,
+        "final_collage_exact_height": 0,
+        "output_format": "jpg",
+        "jpeg_quality": 95
+    }
+}
