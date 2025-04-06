@@ -1,9 +1,9 @@
 {
     "paths": {
-        "input_folder_path": "C:\\Users\\zakhar\\Downloads",
+        "input_folder_path": "C:\\Users\\zakhar\\Downloads\\test",
         "output_folder_path": "C:\\Users\\zakhar\\Downloads\\out",
         "backup_folder_path": "C:\\Users\\zakhar\\Downloads\\backup",
-        "output_filename": "collage.jpg"
+        "output_filename": "C:\\Users\\zakhar\\Downloads\\test\\collage"
     },
     "preprocessing": {
         "enable_preresize": false,
